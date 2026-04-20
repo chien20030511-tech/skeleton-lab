@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 人体骨骼交互实验室</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/models/pose-detection"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0a0a0c;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        /* Main Simulation Area */
+        #simulation-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* The canvas where we draw the skeleton */
+        #skeleton-canvas {
+            position: absolute;
+            z-index: 1;
+        }
+
+        /* Top Right Camera Preview */
+        #camera-preview-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 200px;
+            height: 150px;
+            border: 2px solid #444;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+            z-index: 10;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror for natural feel */
+        }
+
+        /* UI Overlay */
+        #ui-panel {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            z-index: 20;
+            color: white;
+        }
+
+        .toggle-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 5px;
+            backdrop-filter: blur(5px);
+            transition: 0.3s;
+        }
+
+        .toggle-btn:hover {
+            background: rgba(0, 180, 255, 0.4);
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #0a0a0c;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #00d4ff;
+            z-index: 100;
+            font-size: 1.5rem;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading" class="loading-overlay">正在加载 AI 模型...</div>
+
+    <div id="camera-preview-container">
+        <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <div id="simulation-container">
+        <canvas id="skeleton-canvas"></canvas>
+    </div>
+
+    <div id="ui-panel">
+        <button class="toggle-btn" onclick="toggleLabels()">显示/隐藏 标签</button>
+    </div>
+
+    <script>
+        let detector;
+        let video = document.getElementById('video');
+        let canvas = document.getElementById('skeleton-canvas');
+        let ctx = canvas.getContext('2d');
+        let showLabels = true;
+
+        const KEYPOINT_LABELS = {
+            'nose': '头骨',
+            'left_shoulder': '肩膀', 'right_shoulder': '肩膀',
+            'left_elbow': '手肘', 'right_elbow': '手肘',
+            'left_wrist': '手腕', 'right_wrist': '手腕',
+            'left_hip': '骨盆', 'right_hip': '骨盆',
+            'left_knee': '膝盖', 'right_knee': '膝盖',
+            'left_ankle': '脚踝', 'right_ankle': '脚踝'
+        };
+
+        function toggleLabels() {
+            showLabels = !showLabels;
+        }
+
+        async function setupCamera() {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480 },
+                audio: false
+            });
+            video.srcObject = stream;
+
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    resolve(video);
+                };
+            });
+        }
+
+        async function init() {
+            // Initialize Detector (using MoveNet Lightning for speed)
+            const detectorConfig = {
+                modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING
+            };
+            detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, detectorConfig);
+            
+            await setupCamera();
+            
+            // Adjust canvas size to fill the main screen
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            document.getElementById('loading').style.display = 'none';
+            render();
+        }
+
+        function drawLine(p1, p2) {
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.strokeStyle = '#00d4ff';
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        function drawLabel(text, x, y) {
+            if (!showLabels) return;
+            ctx.fillStyle = "white";
+            ctx.font = "bold 16px Arial";
+            ctx.shadowBlur = 4;
+            ctx.shadowColor = "black";
+            ctx.fillText(text, x + 10, y - 10);
+            ctx.shadowBlur = 0;
+        }
+
+        async function render() {
+            const poses = await detector.estimatePoses(video);
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (poses.length > 0) {
+                const pose = poses[0];
+                const keypoints = pose.keypoints;
+
+                // Scale keypoints from 640x480 video space to fullscreen canvas space
+                // Also mirror the X axis for natural interaction
+                const scaleX = canvas.width / video.videoWidth;
+                const scaleY = canvas.height / video.videoHeight;
+
+                const points = {};
+                keypoints.forEach(kp => {
+                    if (kp.score > 0.3) {
+                        points[kp.name] = {
+                            x: (video.videoWidth - kp.x) * scaleX, // Mirroring here
+                            y: kp.y * scaleY
+                        };
+                    }
+                });
+
+                // Skeleton Logic: Connect the points
+                const connections = [
+                    ['left_shoulder', 'right_shoulder'],
+                    ['left_shoulder', 'left_elbow'],
+                    ['left_elbow', 'left_wrist'],
+                    ['right_shoulder', 'right_elbow'],
+                    ['right_elbow', 'right_wrist'],
+                    ['left_shoulder', 'left_hip'],
+                    ['right_shoulder', 'right_hip'],
+                    ['left_hip', 'right_hip'],
+                    ['left_hip', 'left_knee'],
+                    ['left_knee', 'left_ankle'],
+                    ['right_hip', 'right_knee'],
+                    ['right_knee', 'right_ankle']
+                ];
+
+                // Draw Spine (Mid-shoulders to Mid-hips)
+                if (points.left_shoulder && points.right_shoulder && points.left_hip && points.right_hip) {
+                    const midShoulder = { x: (points.left_shoulder.x + points.right_shoulder.x) / 2, y: (points.left_shoulder.y + points.right_shoulder.y) / 2 };
+                    const midHip = { x: (points.left_hip.x + points.right_hip.x) / 2, y: (points.left_hip.y + points.right_hip.y) / 2 };
+                    drawLine(midShoulder, midHip);
+                    drawLabel('脊椎', midShoulder.x, (midShoulder.y + midHip.y) / 2);
+                }
+
+                // Draw existing connections
+                connections.forEach(([p1Name, p2Name]) => {
+                    if (points[p1Name] && points[p2Name]) {
+                        drawLine(points[p1Name], points[p2Name]);
+                    }
+                });
+
+                // Draw Joints and Labels
+                for (const [name, pos] of Object.entries(points)) {
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, 6, 0, 2 * Math.PI);
+                    ctx.fillStyle = "#ffffff";
+                    ctx.fill();
+
+                    if (KEYPOINT_LABELS[name]) {
+                        drawLabel(KEYPOINT_LABELS[name], pos.x, pos.y);
+                    }
+                }
+            }
+
+            requestAnimationFrame(render);
+        }
+
+        // Handle window resizing
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        init();
+    </script>
+</body>
+</html>
